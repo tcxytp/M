@@ -1,47 +1,48 @@
 const express = require('express');
-const cloudinary = require('cloudinary').v2;
 const cors = require('cors');
+const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 app.use(cors());
 
-cloudinary.config({
-  cloud_name: process.env.CLOUD_NAME,
-  api_key: process.env.API_KEY,
-  api_secret: process.env.API_SECRET,
-  secure: true
-});
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+const BUCKET = process.env.SUPABASE_BUCKET || 'songs';
 
 app.get('/songs', async (req, res) => {
   try {
-    const result = await cloudinary.search
-      .expression('resource_type:video')
-      .max_results(200)
-      .execute();
+    const folders = ["Hindi Song's", "English Song's", "FF Song's"];
+    let allSongs = [];
 
-    const songs = result.resources.map(file => {
-      // Cloudinary folder name property check
-      let folderName = file.asset_folder || file.folder || '';
+    for (const folder of folders) {
+      const { data, error } = await supabase.storage.from(BUCKET).list(folder, {
+        limit: 100,
+        offset: 0,
+        sortBy: { column: 'name', order: 'asc' },
+      });
 
-      // Agar folder property na mile to public_id path se check karein
-      if (!folderName && file.public_id.includes('/')) {
-        folderName = file.public_id.split('/')[0];
+      if (!error && data) {
+        data
+          .filter(file => file.name && file.name.match(/\.(mp3|wav|m4a|aac|ogg)$/i))
+          .forEach(file => {
+            const { data: urlData } = supabase.storage
+              .from(BUCKET)
+              .getPublicUrl(`${folder}/${file.name}`);
+
+            const cleanTitle = file.name.replace(/\.[^/.]+$/, '').replace(/_/g, ' ');
+
+            allSongs.push({
+              id: `${folder}/${file.name}`,
+              title: cleanTitle,
+              url: urlData.publicUrl,
+              playlist: folder
+            });
+          });
       }
+    }
 
-      // Title nikalna
-      const cleanTitle = (file.filename || file.public_id.split('/').pop()).replace(/_/g, ' ');
-
-      return {
-        id: file.public_id,
-        title: cleanTitle,
-        url: file.secure_url,
-        playlist: folderName || 'Other'
-      };
-    });
-
-    res.json(songs);
+    res.json(allSongs);
   } catch (error) {
-    console.error('Error fetching from Cloudinary:', error);
+    console.error('Error fetching from Supabase:', error);
     res.status(500).json({ error: 'Failed to fetch songs' });
   }
 });
