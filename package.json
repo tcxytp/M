@@ -1,0 +1,14 @@
+{
+  "name": "music-platform-backend",
+  "version": "1.0.0",
+  "description": "Backend for music platform",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "cloudinary": "^1.37.2",
+    "cors": "^2.8.5",
+    "express": "^4.18.2"
+  }
+}
