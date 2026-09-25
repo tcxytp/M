@@ -1,14 +1,13 @@
 {
-  "name": "music-platform-backend",
+  "name": "vision-backend",
   "version": "1.0.0",
-  "description": "Backend for music platform",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "cloudinary": "^1.37.2",
+    "@supabase/supabase-js": "^2.42.0",
     "cors": "^2.8.5",
-    "express": "^4.18.2"
+    "express": "^4.19.2"
   }
 }
