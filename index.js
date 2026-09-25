@@ -20,21 +20,22 @@ app.get('/songs', async (req, res) => {
       .execute();
 
     const songs = result.resources.map(file => {
-      // public_id jaise "Hindi Song's/tum_hi_ho"
-      const parts = file.public_id.split('/');
-      let playlist = 'Other';
-      let title = file.public_id;
+      // Cloudinary folder name property check
+      let folderName = file.asset_folder || file.folder || '';
 
-      if (parts.length > 1) {
-        playlist = parts[0]; // Pehla hissa folder ka naam hoga
-        title = parts.slice(1).join('/'); // Baaki hissa gaane ka naam
+      // Agar folder property na mile to public_id path se check karein
+      if (!folderName && file.public_id.includes('/')) {
+        folderName = file.public_id.split('/')[0];
       }
+
+      // Title nikalna
+      const cleanTitle = (file.filename || file.public_id.split('/').pop()).replace(/_/g, ' ');
 
       return {
         id: file.public_id,
-        title: title.replace(/_/g, ' '), // Underline hatakar clean title
+        title: cleanTitle,
         url: file.secure_url,
-        playlist: playlist
+        playlist: folderName || 'Other'
       };
     });
 
