@@ -10,7 +10,8 @@ const BUCKET = process.env.SUPABASE_BUCKET || 'songs';
 
 app.get('/songs', async (req, res) => {
   try {
-    const folders = ["Hindi Song's", "English Song's", "FF Song's"];
+    // 4 Playlists including Phonk
+    const folders = ["Hindi Song's", "English Song's", "FF Song's", "Phonk Song's"];
     let allSongs = [];
 
     for (const folder of folders) {
