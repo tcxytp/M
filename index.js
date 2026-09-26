@@ -8,7 +8,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// 4 Accounts Configuration with exact Folder Names
+// 5 Playlists Configuration with Dedicated Accounts & Folder Mappings
 const ACCOUNTS_CONFIG = [
   {
     playlist: "Hindi Song's",
@@ -37,6 +37,13 @@ const ACCOUNTS_CONFIG = [
     key: process.env.SUPABASE_KEY_4,
     bucket: process.env.SUPABASE_BUCKET_4 || process.env.SUPABASE_BUCKET || 'songs',
     folder: "Phonk Song's"
+  },
+  {
+    playlist: "Haryanvi Song's",
+    url: process.env.SUPABASE_URL_5,
+    key: process.env.SUPABASE_KEY_5,
+    bucket: process.env.SUPABASE_BUCKET_5 || process.env.SUPABASE_BUCKET || 'songs',
+    folder: "Haryanvi Song's"
   }
 ];
 
@@ -49,7 +56,7 @@ async function fetchPlaylistSongs(config) {
   try {
     const supabase = createClient(config.url, config.key);
 
-    // 1. Pehle specific folder ke andar check karega
+    // 1. Pehle folder ke andar check karega
     let { data: files, error } = await supabase.storage
       .from(config.bucket)
       .list(config.folder, {
@@ -85,7 +92,6 @@ async function fetchPlaylistSongs(config) {
     console.log(`[SUCCESS] ${config.playlist}: Loaded ${audioFiles.length} songs.`);
 
     return audioFiles.map((file, index) => {
-      // Sahi path ke sath direct streamable URL
       const filePath = currentPath ? `${currentPath}/${file.name}` : file.name;
       const { data: urlData } = supabase.storage
         .from(config.bucket)
