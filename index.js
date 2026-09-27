@@ -7,13 +7,21 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
+// Disable server-side caching so Netlify/Browsers get 100% fresh data
+app.use((req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  next();
+});
+
 const PORT = process.env.PORT || 3000;
-const SUPER_ADMIN_KEY = process.env.ADMIN_SECRET_KEY || 'Vision';
-const MINI_ADMIN_KEY = process.env.MINI_ADMIN_KEY || 'Vision';
+const SUPER_ADMIN_KEY = process.env.ADMIN_SECRET_KEY || 'Vision@Admin7827#Secure';
+const MINI_ADMIN_KEY = process.env.MINI_ADMIN_KEY || 'Vision@MiniAdmin2026#Access';
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 100 * 1024 * 1024 } // 100MB per file
+  limits: { fileSize: 100 * 1024 * 1024 }
 });
 
 function getSupabaseClients() {
@@ -72,9 +80,10 @@ function verifySuperAdminOnly(req, res, next) {
 }
 
 app.get('/', (req, res) => {
-  res.send('Vision Music Engine is Online.');
+  res.send('Vision Music Engine Live & Synced.');
 });
 
+// Accurate folder detector (handles root items, placeholder files, and virtual folders)
 async function scanAccountRealFolders(acc) {
   try {
     const { data: rootItems, error } = await acc.client.storage
@@ -83,28 +92,43 @@ async function scanAccountRealFolders(acc) {
 
     if (error || !rootItems) return [];
 
-    const detectedFolders = rootItems
-      .filter(item => item.id === null || !item.name.includes('.'))
-      .map(item => item.name);
+    const detectedFolders = new Set();
 
-    return Array.from(new Set(detectedFolders));
+    rootItems.forEach(item => {
+      if (item.name && !item.name.startsWith('.')) {
+        // If it's a directory or has no extension, treat as playlist folder
+        if (item.id === null || !item.name.includes('.')) {
+          detectedFolders.add(item.name);
+        }
+      }
+    });
+
+    return Array.from(detectedFolders);
   } catch (err) {
     return [];
   }
 }
 
-// 1. DYNAMIC PLAYLISTS API FOR MAIN SCREEN & ADMIN
+// 1. DYNAMIC REAL-TIME PLAYLISTS API FOR MAIN SCREEN & ADMIN
 app.get('/playlists', async (req, res) => {
   try {
     const accounts = getSupabaseClients();
-    const allFoundFolders = new Set(["Hindi Song's"]);
+    const allFoundFolders = new Set();
 
     for (const acc of accounts) {
       const folders = await scanAccountRealFolders(acc);
-      folders.forEach(f => allFoundFolders.add(f));
+      folders.forEach(f => {
+        if (f && f.trim() !== '') allFoundFolders.add(f.trim());
+      });
     }
 
-    res.json(Array.from(allFoundFolders));
+    // Always include Liked Song's if available, fallback list if totally empty
+    const list = Array.from(allFoundFolders);
+    if (list.length === 0) {
+      list.push("Hindi Song's");
+    }
+
+    res.json(list);
   } catch (err) {
     res.status(500).json({ error: 'Could not fetch playlists' });
   }
@@ -207,7 +231,7 @@ app.post('/admin/login', (req, res) => {
   return res.status(401).json({ success: false, error: 'Incorrect Access Key' });
 });
 
-// Accounts overview
+// ACCOUNTS OVERVIEW
 app.get('/admin/accounts-overview', verifyAnyAdmin, async (req, res) => {
   try {
     const accounts = getSupabaseClients();
@@ -274,8 +298,9 @@ app.post('/admin/create-playlist', verifyAnyAdmin, async (req, res) => {
     const accounts = getSupabaseClients();
     const acc = accounts.find(a => a.id === parseInt(accountId, 10)) || accounts[0];
 
+    // Maintain directory node in Supabase with explicit placeholder
     const placeholderPath = `${cleanFolder}/.init`;
-    const emptyBuf = Buffer.from('vision-folder-init');
+    const emptyBuf = Buffer.from('vision-folder-manifest');
 
     const { error } = await acc.client.storage
       .from(acc.bucket)
@@ -315,6 +340,10 @@ app.post('/admin/rename-playlist', verifyAnyAdmin, async (req, res) => {
           const newPath = `${cleanNewName}/${file.name}`;
           await acc.client.storage.from(acc.bucket).move(oldPath, newPath);
         }
+      } else {
+        // If it was an empty playlist with just placeholder
+        await acc.client.storage.from(acc.bucket).upload(`${cleanNewName}/.init`, Buffer.from('vision-folder-manifest'), { upsert: true });
+        await acc.client.storage.from(acc.bucket).remove([`${oldPlaylistName}/.init`]);
       }
     }
 
@@ -324,7 +353,7 @@ app.post('/admin/rename-playlist', verifyAnyAdmin, async (req, res) => {
   }
 });
 
-// DELETE PLAYLIST & ITS SONGS
+// DELETE PLAYLIST & ALL CONTENTS
 app.post('/admin/delete-playlist', verifyAnyAdmin, async (req, res) => {
   try {
     const { playlistName, accountId } = req.body;
@@ -345,6 +374,8 @@ app.post('/admin/delete-playlist', verifyAnyAdmin, async (req, res) => {
         const filePaths = files.map(f => `${playlistName}/${f.name}`);
         await acc.client.storage.from(acc.bucket).remove(filePaths);
       }
+      // Also remove placeholder file if any
+      await acc.client.storage.from(acc.bucket).remove([`${playlistName}/.init`]);
     }
 
     res.json({ success: true, message: `Playlist "${playlistName}" deleted successfully!` });
@@ -457,7 +488,7 @@ app.post('/admin/delete', verifyAnyAdmin, async (req, res) => {
   }
 });
 
-// RENAME SONG (SUPER ADMIN ONLY)
+// RENAME SONG
 app.post('/admin/rename', verifySuperAdminOnly, async (req, res) => {
   try {
     const { accountId, playlist, oldFileName, newTitle } = req.body;
