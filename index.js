@@ -15,15 +15,7 @@ const upload = multer({
   limits: { fileSize: 60 * 1024 * 1024 } // 60MB max per song
 });
 
-const DEFAULT_PLAYLISTS = [
-  "Hindi Song's",
-  "English Song's",
-  "Haryanvi Song's",
-  "FF Song's",
-  "Phonk Song's"
-];
-
-// Helper: Scan Accounts 1 to 20
+// Helper: Scan Accounts 1 to 20 dynamically from Railway environment
 function getSupabaseClients() {
   const clients = [];
   if (process.env.SUPABASE_URL && process.env.SUPABASE_KEY) {
@@ -40,7 +32,6 @@ function getSupabaseClients() {
     const key = process.env[`SUPABASE_KEY_${i}`];
     const bucket = process.env[`SUPABASE_BUCKET_${i}`] || process.env.SUPABASE_BUCKET || 'songs';
 
-    // Avoid duplicate entry if URL_1 is already pushed via default
     if (url && key && (!process.env.SUPABASE_URL || url !== process.env.SUPABASE_URL)) {
       clients.push({
         id: clients.length + 1,
@@ -66,28 +57,28 @@ app.get('/', (req, res) => {
   res.send('Vision Music Engine is Online.');
 });
 
-// Helper: Scan folders inside an account bucket
-async function scanAccountFolders(acc) {
+// Helper: Read ONLY the actual existing folders inside this specific account's bucket
+async function scanAccountRealFolders(acc) {
   try {
     const { data: rootItems, error } = await acc.client.storage
       .from(acc.bucket)
       .list('', { limit: 1000 });
 
-    if (error || !rootItems) return DEFAULT_PLAYLISTS;
+    if (error || !rootItems) return [];
 
+    // Filter only folder names (items with no extension or explicitly directory-based)
     const detectedFolders = rootItems
       .filter(item => item.id === null || !item.name.includes('.'))
       .map(item => item.name);
 
-    // Merge default and custom folders uniquely
-    return Array.from(new Set([...DEFAULT_PLAYLISTS, ...detectedFolders]));
+    return Array.from(new Set(detectedFolders));
   } catch (err) {
-    return DEFAULT_PLAYLISTS;
+    return [];
   }
 }
 
 // ==========================================
-// 1. PUBLIC API: FETCH ALL SONGS ACROSS ALL ACCOUNTS
+// 1. PUBLIC API: FETCH ALL SONGS (FOR USERS)
 // ==========================================
 app.get('/songs', async (req, res) => {
   try {
@@ -95,36 +86,27 @@ app.get('/songs', async (req, res) => {
     const songPromises = [];
 
     for (const acc of accounts) {
-      const folders = await scanAccountFolders(acc);
+      const folders = await scanAccountRealFolders(acc);
 
-      for (const folder of folders) {
+      // If account has no subfolders, check root files
+      if (folders.length === 0) {
         songPromises.push((async () => {
           try {
-            const { data: files } = await acc.client.storage
+            const { data: rootFiles } = await acc.client.storage
               .from(acc.bucket)
-              .list(folder, { limit: 1000, sortBy: { column: 'name', order: 'asc' } });
+              .list('', { limit: 1000, sortBy: { column: 'name', order: 'asc' } });
 
-            if (!files || files.length === 0) return [];
+            if (!rootFiles) return [];
 
-            const audioFiles = files.filter(f =>
-              f.name && !f.name.startsWith('.') &&
-              f.name.match(/\.(mp3|wav|m4a|aac|ogg|flac)$/i)
-            );
-
-            return audioFiles.map((file, idx) => {
-              const filePath = `${folder}/${file.name}`;
-              const { data: urlData } = acc.client.storage
-                .from(acc.bucket)
-                .getPublicUrl(filePath);
-
-              const cleanTitle = file.name.replace(/\.[^/.]+$/, '').replace(/_/g, ' ').trim();
-
+            const audio = rootFiles.filter(f => f.name && f.name.match(/\.(mp3|wav|m4a|aac|ogg|flac)$/i));
+            return audio.map((file, idx) => {
+              const { data: urlData } = acc.client.storage.from(acc.bucket).getPublicUrl(file.name);
               return {
-                id: `${folder.toLowerCase().replace(/[^a-z0-9]/g, '')}_${acc.id}_${idx + 1}`,
+                id: `root_${acc.id}_${idx + 1}`,
                 fileName: file.name,
-                title: cleanTitle,
+                title: file.name.replace(/\.[^/.]+$/, '').replace(/_/g, ' ').trim(),
                 url: urlData.publicUrl,
-                playlist: folder,
+                playlist: "Hindi Song's",
                 sizeBytes: file.metadata?.size || 0,
                 accountId: acc.id
               };
@@ -133,6 +115,44 @@ app.get('/songs', async (req, res) => {
             return [];
           }
         })());
+      } else {
+        for (const folder of folders) {
+          songPromises.push((async () => {
+            try {
+              const { data: files } = await acc.client.storage
+                .from(acc.bucket)
+                .list(folder, { limit: 1000, sortBy: { column: 'name', order: 'asc' } });
+
+              if (!files || files.length === 0) return [];
+
+              const audioFiles = files.filter(f =>
+                f.name && !f.name.startsWith('.') &&
+                f.name.match(/\.(mp3|wav|m4a|aac|ogg|flac)$/i)
+              );
+
+              return audioFiles.map((file, idx) => {
+                const filePath = `${folder}/${file.name}`;
+                const { data: urlData } = acc.client.storage
+                  .from(acc.bucket)
+                  .getPublicUrl(filePath);
+
+                const cleanTitle = file.name.replace(/\.[^/.]+$/, '').replace(/_/g, ' ').trim();
+
+                return {
+                  id: `${folder.toLowerCase().replace(/[^a-z0-9]/g, '')}_${acc.id}_${idx + 1}`,
+                  fileName: file.name,
+                  title: cleanTitle,
+                  url: urlData.publicUrl,
+                  playlist: folder,
+                  sizeBytes: file.metadata?.size || 0,
+                  accountId: acc.id
+                };
+              });
+            } catch (e) {
+              return [];
+            }
+          })());
+        }
       }
     }
 
@@ -145,7 +165,7 @@ app.get('/songs', async (req, res) => {
 });
 
 // ==========================================
-// 2. ADMIN/DEV APIS: MULTI-ACCOUNT & STORAGE
+// 2. ADMIN/DEV APIS: ISOLATED MULTI-ACCOUNT
 // ==========================================
 app.post('/admin/login', (req, res) => {
   const { password } = req.body;
@@ -155,19 +175,19 @@ app.post('/admin/login', (req, res) => {
   return res.status(401).json({ success: false, error: 'Incorrect Dev Key' });
 });
 
-// Get Accounts List with Live Storage, Folders & File Counts
+// Get Accounts List with Live Real Folders & Storage Calculations
 app.get('/admin/accounts-overview', verifyAdmin, async (req, res) => {
   try {
     const accounts = getSupabaseClients();
     const overview = [];
 
     for (const acc of accounts) {
-      const folders = await scanAccountFolders(acc);
+      const realFolders = await scanAccountRealFolders(acc);
       let totalSizeBytes = 0;
       let totalSongsCount = 0;
       const folderBreakdown = {};
 
-      for (const folder of folders) {
+      for (const folder of realFolders) {
         try {
           const { data: files } = await acc.client.storage
             .from(acc.bucket)
@@ -180,8 +200,7 @@ app.get('/admin/accounts-overview', verifyAdmin, async (req, res) => {
 
           let folderBytes = 0;
           audioFiles.forEach(f => {
-            const bytes = f.metadata?.size || 0;
-            folderBytes += bytes;
+            folderBytes += f.metadata?.size || 0;
           });
 
           totalSizeBytes += folderBytes;
@@ -206,7 +225,7 @@ app.get('/admin/accounts-overview', verifyAdmin, async (req, res) => {
         usedGB: usedGB,
         percentUsed: percentUsed,
         isFull: isFull,
-        folders: folders,
+        folders: realFolders, // STRICT REAL FOLDERS ONLY
         folderBreakdown: folderBreakdown
       });
     }
@@ -217,7 +236,7 @@ app.get('/admin/accounts-overview', verifyAdmin, async (req, res) => {
   }
 });
 
-// Create New Playlist / Folder inside an account
+// Create New Playlist/Folder in Selected Account
 app.post('/admin/create-playlist', verifyAdmin, async (req, res) => {
   try {
     const { accountId, playlistName } = req.body;
@@ -229,7 +248,6 @@ app.post('/admin/create-playlist', verifyAdmin, async (req, res) => {
     const accounts = getSupabaseClients();
     const acc = accounts.find(a => a.id === parseInt(accountId, 10)) || accounts[0];
 
-    // Supabase folders are created by placing a placeholder file
     const placeholderPath = `${cleanFolder}/.init`;
     const emptyBuf = Buffer.from('vision-folder-init');
 
@@ -261,7 +279,7 @@ app.post('/admin/upload', verifyAdmin, upload.single('songFile'), async (req, re
     const targetAcc = accounts.find(a => a.id === parseInt(accountId, 10)) || accounts[0];
 
     // Check Account 1GB storage limit
-    const folders = await scanAccountFolders(targetAcc);
+    const folders = await scanAccountRealFolders(targetAcc);
     let totalBytes = 0;
     for (const f of folders) {
       const { data: files } = await targetAcc.client.storage.from(targetAcc.bucket).list(f, { limit: 1000 });
@@ -274,7 +292,7 @@ app.post('/admin/upload', verifyAdmin, upload.single('songFile'), async (req, re
     if (totalBytes + file.size > ONE_GB_BYTES) {
       return res.status(400).json({
         success: false,
-        error: `STORAGE FULL! ${targetAcc.name} has reached its 1GB limit. Please select another account from dropdown to upload.`
+        error: `STORAGE FULL! ${targetAcc.name} has reached its 1GB limit. Please choose another account.`
       });
     }
 
@@ -320,17 +338,7 @@ app.post('/admin/delete', verifyAdmin, async (req, res) => {
     if (!error && data && data.length > 0) {
       res.json({ success: true, message: `"${fileName}" deleted successfully.` });
     } else {
-      // Fallback check all accounts if accountId wasn't matched
-      let found = false;
-      for (const a of accounts) {
-        const delRes = await a.client.storage.from(a.bucket).remove([targetFilePath]);
-        if (!delRes.error && delRes.data && delRes.data.length > 0) {
-          found = true;
-          break;
-        }
-      }
-      if (found) res.json({ success: true, message: `"${fileName}" deleted successfully.` });
-      else res.status(500).json({ success: false, error: error ? error.message : 'Could not remove file' });
+      res.status(500).json({ success: false, error: error ? error.message : 'Could not remove file' });
     }
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
