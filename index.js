@@ -8,14 +8,14 @@ app.use(cors({ origin: '*' }));
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const ADMIN_KEY = process.env.ADMIN_SECRET_KEY || 'Vision@Admin7827#Secure';
+const SUPER_ADMIN_KEY = process.env.ADMIN_SECRET_KEY || 'Vision@Admin7827#Secure';
+const MINI_ADMIN_KEY = process.env.MINI_ADMIN_KEY || 'Vision@MiniAdmin2026#Access';
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 60 * 1024 * 1024 } // 60MB max per song
+  limits: { fileSize: 100 * 1024 * 1024 } // 100MB per file
 });
 
-// Helper: Scan Accounts 1 to 20 dynamically from Railway environment
 function getSupabaseClients() {
   const clients = [];
   if (process.env.SUPABASE_URL && process.env.SUPABASE_KEY) {
@@ -44,20 +44,39 @@ function getSupabaseClients() {
   return clients;
 }
 
-function verifyAdmin(req, res, next) {
+// Security Middleware: Allows both Super Admin and Mini Admin
+function verifyAnyAdmin(req, res, next) {
   const authHeader = req.headers['authorization'] || req.headers['x-admin-key'];
   const key = authHeader ? authHeader.replace('Bearer ', '').trim() : '';
-  if (key !== ADMIN_KEY) {
-    return res.status(401).json({ success: false, error: 'Unauthorized: Invalid Dev Key' });
+
+  if (key === SUPER_ADMIN_KEY) {
+    req.adminRole = 'superadmin';
+    return next();
+  } else if (key === MINI_ADMIN_KEY) {
+    req.adminRole = 'miniadmin';
+    return next();
   }
-  next();
+
+  return res.status(401).json({ success: false, error: 'Unauthorized: Invalid Key' });
+}
+
+// Strict Super Admin Middleware (For creating playlists / full server control)
+function verifySuperAdminOnly(req, res, next) {
+  const authHeader = req.headers['authorization'] || req.headers['x-admin-key'];
+  const key = authHeader ? authHeader.replace('Bearer ', '').trim() : '';
+
+  if (key === SUPER_ADMIN_KEY) {
+    req.adminRole = 'superadmin';
+    return next();
+  }
+
+  return res.status(403).json({ success: false, error: 'Access Denied: Super Admin Only Feature' });
 }
 
 app.get('/', (req, res) => {
-  res.send('Vision Music Engine is Online.');
+  res.send('Vision Music Multi-Role Server Online.');
 });
 
-// Helper: Read ONLY the actual existing folders inside this specific account's bucket
 async function scanAccountRealFolders(acc) {
   try {
     const { data: rootItems, error } = await acc.client.storage
@@ -66,7 +85,6 @@ async function scanAccountRealFolders(acc) {
 
     if (error || !rootItems) return [];
 
-    // Filter only folder names (items with no extension or explicitly directory-based)
     const detectedFolders = rootItems
       .filter(item => item.id === null || !item.name.includes('.'))
       .map(item => item.name);
@@ -77,9 +95,7 @@ async function scanAccountRealFolders(acc) {
   }
 }
 
-// ==========================================
-// 1. PUBLIC API: FETCH ALL SONGS (FOR USERS)
-// ==========================================
+// 1. PUBLIC API: FETCH ALL TRACKS (NO KEY NEEDED)
 app.get('/songs', async (req, res) => {
   try {
     const accounts = getSupabaseClients();
@@ -88,7 +104,6 @@ app.get('/songs', async (req, res) => {
     for (const acc of accounts) {
       const folders = await scanAccountRealFolders(acc);
 
-      // If account has no subfolders, check root files
       if (folders.length === 0) {
         songPromises.push((async () => {
           try {
@@ -159,24 +174,34 @@ app.get('/songs', async (req, res) => {
     const results = await Promise.all(songPromises);
     res.json(results.flat());
   } catch (error) {
-    console.error('Songs fetch error:', error);
     res.status(500).json({ error: 'Failed to fetch tracks' });
   }
 });
 
-// ==========================================
-// 2. ADMIN/DEV APIS: ISOLATED MULTI-ACCOUNT
-// ==========================================
+// 2. DUAL ROLE AUTHENTICATION
 app.post('/admin/login', (req, res) => {
   const { password } = req.body;
-  if (password && password.trim() === ADMIN_KEY) {
-    return res.json({ success: true, message: 'Dev Authentication Successful' });
+  const key = (password || '').trim();
+
+  if (key === SUPER_ADMIN_KEY) {
+    return res.json({
+      success: true,
+      role: 'superadmin',
+      message: 'Authenticated as Super Admin'
+    });
+  } else if (key === MINI_ADMIN_KEY) {
+    return res.json({
+      success: true,
+      role: 'miniadmin',
+      message: 'Authenticated as Mini Admin'
+    });
   }
-  return res.status(401).json({ success: false, error: 'Incorrect Dev Key' });
+
+  return res.status(401).json({ success: false, error: 'Incorrect Access Key' });
 });
 
-// Get Accounts List with Live Real Folders & Storage Calculations
-app.get('/admin/accounts-overview', verifyAdmin, async (req, res) => {
+// Accounts Overview (Accessible by both, UI filters data based on role)
+app.get('/admin/accounts-overview', verifyAnyAdmin, async (req, res) => {
   try {
     const accounts = getSupabaseClients();
     const overview = [];
@@ -225,19 +250,19 @@ app.get('/admin/accounts-overview', verifyAdmin, async (req, res) => {
         usedGB: usedGB,
         percentUsed: percentUsed,
         isFull: isFull,
-        folders: realFolders, // STRICT REAL FOLDERS ONLY
+        folders: realFolders,
         folderBreakdown: folderBreakdown
       });
     }
 
-    res.json({ success: true, accounts: overview });
+    res.json({ success: true, role: req.adminRole, accounts: overview });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// Create New Playlist/Folder in Selected Account
-app.post('/admin/create-playlist', verifyAdmin, async (req, res) => {
+// Create Playlist (Super Admin Only)
+app.post('/admin/create-playlist', verifySuperAdminOnly, async (req, res) => {
   try {
     const { accountId, playlistName } = req.body;
     if (!playlistName || !playlistName.trim()) {
@@ -265,62 +290,73 @@ app.post('/admin/create-playlist', verifyAdmin, async (req, res) => {
   }
 });
 
-// Upload song directly into selected account & playlist with 1GB verification
-app.post('/admin/upload', verifyAdmin, upload.single('songFile'), async (req, res) => {
+// Upload songs (Accessible by both Super and Mini Admin)
+app.post('/admin/upload', verifyAnyAdmin, upload.array('songFiles', 50), async (req, res) => {
   try {
-    const { accountId, playlist, customTitle } = req.body;
-    const file = req.file;
+    const { accountId, playlist } = req.body;
+    const files = req.files;
 
-    if (!file || !playlist) {
-      return res.status(400).json({ success: false, error: 'File and Playlist are required' });
+    if (!files || files.length === 0 || !playlist) {
+      return res.status(400).json({ success: false, error: 'Files and Playlist are required' });
     }
 
     const accounts = getSupabaseClients();
     const targetAcc = accounts.find(a => a.id === parseInt(accountId, 10)) || accounts[0];
 
-    // Check Account 1GB storage limit
     const folders = await scanAccountRealFolders(targetAcc);
     let totalBytes = 0;
     for (const f of folders) {
-      const { data: files } = await targetAcc.client.storage.from(targetAcc.bucket).list(f, { limit: 1000 });
-      (files || []).forEach(item => {
+      const { data: fList } = await targetAcc.client.storage.from(targetAcc.bucket).list(f, { limit: 1000 });
+      (fList || []).forEach(item => {
         totalBytes += item.metadata?.size || 0;
       });
     }
 
+    let incomingBatchBytes = 0;
+    files.forEach(f => incomingBatchBytes += f.size);
+
     const ONE_GB_BYTES = 1024 * 1024 * 1024;
-    if (totalBytes + file.size > ONE_GB_BYTES) {
+    if (totalBytes + incomingBatchBytes > ONE_GB_BYTES) {
       return res.status(400).json({
         success: false,
-        error: `STORAGE FULL! ${targetAcc.name} has reached its 1GB limit. Please choose another account.`
+        error: `STORAGE LIMIT REACHED! ${targetAcc.name} cannot fit this batch.`
       });
     }
 
-    const cleanBaseName = (customTitle || file.originalname.replace(/\.[^/.]+$/, ''))
-      .trim()
-      .replace(/[/\\?%*:|"<>]/g, '');
-    const cleanFileName = `${cleanBaseName}.mp3`;
-    const targetFilePath = `${playlist}/${cleanFileName}`;
+    let uploadedCount = 0;
+    const uploadErrors = [];
 
-    const { data, error } = await targetAcc.client.storage
-      .from(targetAcc.bucket)
-      .upload(targetFilePath, file.buffer, {
-        contentType: file.mimetype || 'audio/mpeg',
-        upsert: true
-      });
+    for (const file of files) {
+      const cleanBaseName = file.originalname.replace(/\.[^/.]+$/, '').trim().replace(/[/\\?%*:|"<>]/g, '');
+      const cleanFileName = `${cleanBaseName}.mp3`;
+      const targetFilePath = `${playlist}/${cleanFileName}`;
 
-    if (!error && data) {
-      res.json({ success: true, message: `"${cleanBaseName}" uploaded to ${targetAcc.name} [${playlist}] successfully!` });
-    } else {
-      res.status(500).json({ success: false, error: error ? error.message : 'Upload failed' });
+      const { error } = await targetAcc.client.storage
+        .from(targetAcc.bucket)
+        .upload(targetFilePath, file.buffer, {
+          contentType: file.mimetype || 'audio/mpeg',
+          upsert: true
+        });
+
+      if (!error) {
+        uploadedCount++;
+      } else {
+        uploadErrors.push(file.originalname);
+      }
     }
+
+    res.json({
+      success: true,
+      message: `Successfully uploaded ${uploadedCount} of ${files.length} songs to [${playlist}]!`,
+      failed: uploadErrors
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// Delete song
-app.post('/admin/delete', verifyAdmin, async (req, res) => {
+// Delete song (Accessible by both Super and Mini Admin)
+app.post('/admin/delete', verifyAnyAdmin, async (req, res) => {
   try {
     const { accountId, playlist, fileName } = req.body;
     if (!playlist || !fileName) {
@@ -345,8 +381,8 @@ app.post('/admin/delete', verifyAdmin, async (req, res) => {
   }
 });
 
-// Rename song
-app.post('/admin/rename', verifyAdmin, async (req, res) => {
+// Rename song (Super Admin Only)
+app.post('/admin/rename', verifySuperAdminOnly, async (req, res) => {
   try {
     const { accountId, playlist, oldFileName, newTitle } = req.body;
     if (!playlist || !oldFileName || !newTitle) {
