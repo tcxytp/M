@@ -7,7 +7,6 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-// Disable server-side caching so Netlify/Browsers get 100% fresh data
 app.use((req, res, next) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.setHeader('Pragma', 'no-cache');
@@ -76,14 +75,13 @@ function verifySuperAdminOnly(req, res, next) {
     return next();
   }
 
-  return res.status(403).json({ success: false, error: 'Access Denied: Super Admin Only' });
+  return res.status(403).json({ success: false, error: 'Access Denied: Super Admin Only Feature' });
 }
 
 app.get('/', (req, res) => {
-  res.send('Vision Music Engine Live & Synced.');
+  res.send('Vision Music Engine Live.');
 });
 
-// Accurate folder detector (handles root items, placeholder files, and virtual folders)
 async function scanAccountRealFolders(acc) {
   try {
     const { data: rootItems, error } = await acc.client.storage
@@ -93,10 +91,8 @@ async function scanAccountRealFolders(acc) {
     if (error || !rootItems) return [];
 
     const detectedFolders = new Set();
-
     rootItems.forEach(item => {
       if (item.name && !item.name.startsWith('.')) {
-        // If it's a directory or has no extension, treat as playlist folder
         if (item.id === null || !item.name.includes('.')) {
           detectedFolders.add(item.name);
         }
@@ -109,7 +105,7 @@ async function scanAccountRealFolders(acc) {
   }
 }
 
-// 1. DYNAMIC REAL-TIME PLAYLISTS API FOR MAIN SCREEN & ADMIN
+// 1. DYNAMIC PLAYLISTS API
 app.get('/playlists', async (req, res) => {
   try {
     const accounts = getSupabaseClients();
@@ -122,12 +118,8 @@ app.get('/playlists', async (req, res) => {
       });
     }
 
-    // Always include Liked Song's if available, fallback list if totally empty
     const list = Array.from(allFoundFolders);
-    if (list.length === 0) {
-      list.push("Hindi Song's");
-    }
-
+    if (list.length === 0) list.push("Hindi Song's");
     res.json(list);
   } catch (err) {
     res.status(500).json({ error: 'Could not fetch playlists' });
@@ -217,7 +209,7 @@ app.get('/songs', async (req, res) => {
   }
 });
 
-// 3. ADMIN AUTH
+// 3. DUAL ROLE LOGIN
 app.post('/admin/login', (req, res) => {
   const { password } = req.body;
   const key = (password || '').trim();
@@ -231,7 +223,7 @@ app.post('/admin/login', (req, res) => {
   return res.status(401).json({ success: false, error: 'Incorrect Access Key' });
 });
 
-// ACCOUNTS OVERVIEW
+// Accounts overview
 app.get('/admin/accounts-overview', verifyAnyAdmin, async (req, res) => {
   try {
     const accounts = getSupabaseClients();
@@ -286,8 +278,8 @@ app.get('/admin/accounts-overview', verifyAnyAdmin, async (req, res) => {
   }
 });
 
-// CREATE PLAYLIST
-app.post('/admin/create-playlist', verifyAnyAdmin, async (req, res) => {
+// CREATE PLAYLIST (Super Admin Only)
+app.post('/admin/create-playlist', verifySuperAdminOnly, async (req, res) => {
   try {
     const { accountId, playlistName } = req.body;
     if (!playlistName || !playlistName.trim()) {
@@ -298,7 +290,6 @@ app.post('/admin/create-playlist', verifyAnyAdmin, async (req, res) => {
     const accounts = getSupabaseClients();
     const acc = accounts.find(a => a.id === parseInt(accountId, 10)) || accounts[0];
 
-    // Maintain directory node in Supabase with explicit placeholder
     const placeholderPath = `${cleanFolder}/.init`;
     const emptyBuf = Buffer.from('vision-folder-manifest');
 
@@ -316,8 +307,8 @@ app.post('/admin/create-playlist', verifyAnyAdmin, async (req, res) => {
   }
 });
 
-// RENAME PLAYLIST
-app.post('/admin/rename-playlist', verifyAnyAdmin, async (req, res) => {
+// RENAME PLAYLIST (Super Admin Only)
+app.post('/admin/rename-playlist', verifySuperAdminOnly, async (req, res) => {
   try {
     const { oldPlaylistName, newPlaylistName, accountId } = req.body;
     if (!oldPlaylistName || !newPlaylistName) {
@@ -341,7 +332,6 @@ app.post('/admin/rename-playlist', verifyAnyAdmin, async (req, res) => {
           await acc.client.storage.from(acc.bucket).move(oldPath, newPath);
         }
       } else {
-        // If it was an empty playlist with just placeholder
         await acc.client.storage.from(acc.bucket).upload(`${cleanNewName}/.init`, Buffer.from('vision-folder-manifest'), { upsert: true });
         await acc.client.storage.from(acc.bucket).remove([`${oldPlaylistName}/.init`]);
       }
@@ -353,8 +343,8 @@ app.post('/admin/rename-playlist', verifyAnyAdmin, async (req, res) => {
   }
 });
 
-// DELETE PLAYLIST & ALL CONTENTS
-app.post('/admin/delete-playlist', verifyAnyAdmin, async (req, res) => {
+// DELETE PLAYLIST (Super Admin Only)
+app.post('/admin/delete-playlist', verifySuperAdminOnly, async (req, res) => {
   try {
     const { playlistName, accountId } = req.body;
     if (!playlistName) {
@@ -374,7 +364,6 @@ app.post('/admin/delete-playlist', verifyAnyAdmin, async (req, res) => {
         const filePaths = files.map(f => `${playlistName}/${f.name}`);
         await acc.client.storage.from(acc.bucket).remove(filePaths);
       }
-      // Also remove placeholder file if any
       await acc.client.storage.from(acc.bucket).remove([`${playlistName}/.init`]);
     }
 
@@ -384,7 +373,7 @@ app.post('/admin/delete-playlist', verifyAnyAdmin, async (req, res) => {
   }
 });
 
-// BATCH UPLOAD SONGS
+// BATCH UPLOAD SONGS (Allowed for BOTH Super & Mini Admin)
 app.post('/admin/upload', verifyAnyAdmin, upload.array('songFiles', 50), async (req, res) => {
   try {
     const { accountId, playlist } = req.body;
@@ -453,7 +442,7 @@ app.post('/admin/upload', verifyAnyAdmin, upload.array('songFiles', 50), async (
   }
 });
 
-// DELETE SONG
+// DELETE SONG (Allowed for BOTH Super & Mini Admin)
 app.post('/admin/delete', verifyAnyAdmin, async (req, res) => {
   try {
     const { accountId, playlist, fileName } = req.body;
@@ -488,8 +477,8 @@ app.post('/admin/delete', verifyAnyAdmin, async (req, res) => {
   }
 });
 
-// RENAME SONG
-app.post('/admin/rename', verifySuperAdminOnly, async (req, res) => {
+// RENAME SONG (Allowed for BOTH Super & Mini Admin)
+app.post('/admin/rename', verifyAnyAdmin, async (req, res) => {
   try {
     const { accountId, playlist, oldFileName, newTitle } = req.body;
     if (!playlist || !oldFileName || !newTitle) {
@@ -501,7 +490,19 @@ app.post('/admin/rename', verifySuperAdminOnly, async (req, res) => {
     const newPath = `${playlist}/${cleanNewFileName}`;
 
     const accounts = getSupabaseClients();
-    const targetAcc = accounts.find(a => a.id === parseInt(accountId, 10)) || accounts[0];
+    let targetAcc = accountId ? accounts.find(a => a.id === parseInt(accountId, 10)) : null;
+
+    if (!targetAcc) {
+      for (const a of accounts) {
+        const folders = await scanAccountRealFolders(a);
+        if (folders.includes(playlist)) {
+          targetAcc = a;
+          break;
+        }
+      }
+    }
+
+    if (!targetAcc) targetAcc = accounts[0];
 
     const { error } = await targetAcc.client.storage.from(targetAcc.bucket).move(oldPath, newPath);
 
