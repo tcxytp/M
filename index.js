@@ -44,7 +44,6 @@ function getSupabaseClients() {
   return clients;
 }
 
-// Security Middleware: Allows both Super Admin and Mini Admin
 function verifyAnyAdmin(req, res, next) {
   const authHeader = req.headers['authorization'] || req.headers['x-admin-key'];
   const key = authHeader ? authHeader.replace('Bearer ', '').trim() : '';
@@ -60,7 +59,6 @@ function verifyAnyAdmin(req, res, next) {
   return res.status(401).json({ success: false, error: 'Unauthorized: Invalid Key' });
 }
 
-// Strict Super Admin Middleware (For creating playlists / full server control)
 function verifySuperAdminOnly(req, res, next) {
   const authHeader = req.headers['authorization'] || req.headers['x-admin-key'];
   const key = authHeader ? authHeader.replace('Bearer ', '').trim() : '';
@@ -95,7 +93,7 @@ async function scanAccountRealFolders(acc) {
   }
 }
 
-// 1. PUBLIC API: FETCH ALL TRACKS (NO KEY NEEDED)
+// 1. PUBLIC API: FETCH ALL TRACKS
 app.get('/songs', async (req, res) => {
   try {
     const accounts = getSupabaseClients();
@@ -200,7 +198,7 @@ app.post('/admin/login', (req, res) => {
   return res.status(401).json({ success: false, error: 'Incorrect Access Key' });
 });
 
-// Accounts Overview (Accessible by both, UI filters data based on role)
+// Accounts Overview with All Account Folders
 app.get('/admin/accounts-overview', verifyAnyAdmin, async (req, res) => {
   try {
     const accounts = getSupabaseClients();
@@ -290,7 +288,7 @@ app.post('/admin/create-playlist', verifySuperAdminOnly, async (req, res) => {
   }
 });
 
-// Upload songs (Accessible by both Super and Mini Admin)
+// Upload songs (Batch handler with auto-account discovery for Mini Admin)
 app.post('/admin/upload', verifyAnyAdmin, upload.array('songFiles', 50), async (req, res) => {
   try {
     const { accountId, playlist } = req.body;
@@ -301,8 +299,28 @@ app.post('/admin/upload', verifyAnyAdmin, upload.array('songFiles', 50), async (
     }
 
     const accounts = getSupabaseClients();
-    const targetAcc = accounts.find(a => a.id === parseInt(accountId, 10)) || accounts[0];
+    let targetAcc = null;
 
+    if (accountId) {
+      targetAcc = accounts.find(a => a.id === parseInt(accountId, 10));
+    }
+
+    // Auto-detect account if accountId not provided by Mini Admin
+    if (!targetAcc) {
+      for (const a of accounts) {
+        const folders = await scanAccountRealFolders(a);
+        if (folders.includes(playlist)) {
+          targetAcc = a;
+          break;
+        }
+      }
+    }
+
+    if (!targetAcc) {
+      targetAcc = accounts[0];
+    }
+
+    // Check storage limits
     const folders = await scanAccountRealFolders(targetAcc);
     let totalBytes = 0;
     for (const f of folders) {
@@ -319,7 +337,7 @@ app.post('/admin/upload', verifyAnyAdmin, upload.array('songFiles', 50), async (
     if (totalBytes + incomingBatchBytes > ONE_GB_BYTES) {
       return res.status(400).json({
         success: false,
-        error: `STORAGE LIMIT REACHED! ${targetAcc.name} cannot fit this batch.`
+        error: `STORAGE LIMIT REACHED! ${targetAcc.name} is full (1GB limit).`
       });
     }
 
@@ -355,7 +373,7 @@ app.post('/admin/upload', verifyAnyAdmin, upload.array('songFiles', 50), async (
   }
 });
 
-// Delete song (Accessible by both Super and Mini Admin)
+// Delete song (With auto-account fallback)
 app.post('/admin/delete', verifyAnyAdmin, async (req, res) => {
   try {
     const { accountId, playlist, fileName } = req.body;
@@ -365,16 +383,32 @@ app.post('/admin/delete', verifyAnyAdmin, async (req, res) => {
 
     const targetFilePath = `${playlist}/${fileName}`;
     const accounts = getSupabaseClients();
-    const targetAcc = accounts.find(a => a.id === parseInt(accountId, 10)) || accounts[0];
+    let targetAcc = accountId ? accounts.find(a => a.id === parseInt(accountId, 10)) : null;
 
-    const { data, error } = await targetAcc.client.storage
-      .from(targetAcc.bucket)
-      .remove([targetFilePath]);
+    if (targetAcc) {
+      const { data, error } = await targetAcc.client.storage
+        .from(targetAcc.bucket)
+        .remove([targetFilePath]);
 
-    if (!error && data && data.length > 0) {
+      if (!error && data && data.length > 0) {
+        return res.json({ success: true, message: `"${fileName}" deleted successfully.` });
+      }
+    }
+
+    // Fallback search across accounts
+    let deleted = false;
+    for (const a of accounts) {
+      const { data, error } = await a.client.storage.from(a.bucket).remove([targetFilePath]);
+      if (!error && data && data.length > 0) {
+        deleted = true;
+        break;
+      }
+    }
+
+    if (deleted) {
       res.json({ success: true, message: `"${fileName}" deleted successfully.` });
     } else {
-      res.status(500).json({ success: false, error: error ? error.message : 'Could not remove file' });
+      res.status(500).json({ success: false, error: 'Could not remove file' });
     }
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
