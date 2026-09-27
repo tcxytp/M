@@ -58,7 +58,7 @@ app.get('/', (req, res) => {
   res.send('Vision Music Engine is Online.');
 });
 
-// PUBLIC API: NORMAL USERS (NO AUTH REQUIRED)
+// PUBLIC API: STRICT ISOLATED FOLDER SCANNING
 app.get('/songs', async (req, res) => {
   try {
     const accounts = getSupabaseClients();
@@ -68,18 +68,38 @@ app.get('/songs', async (req, res) => {
       for (const folder of TARGET_FOLDERS) {
         songPromises.push((async () => {
           try {
-            let { data: files } = await acc.client.storage
-              .from(acc.bucket)
-              .list(folder, { limit: 1000, sortBy: { column: 'name', order: 'asc' } });
+            // Check exact folder name and alternate folder name without apostrophe
+            const possibleFolderNames = [
+              folder,
+              folder.replace("'", ""),
+              folder.replace("’", "")
+            ];
 
+            let files = [];
             let currentPath = folder;
 
-            if (!files || files.length === 0) {
+            for (const fName of possibleFolderNames) {
+              const resList = await acc.client.storage
+                .from(acc.bucket)
+                .list(fName, { limit: 1000, sortBy: { column: 'name', order: 'asc' } });
+
+              if (resList.data && resList.data.length > 0) {
+                files = resList.data;
+                currentPath = fName;
+                break;
+              }
+            }
+
+            // ONLY fall back to root for Hindi Song's if folder is empty
+            if ((!files || files.length === 0) && folder === "Hindi Song's") {
               const rootRes = await acc.client.storage
                 .from(acc.bucket)
                 .list('', { limit: 1000, sortBy: { column: 'name', order: 'asc' } });
-              files = rootRes.data || [];
-              currentPath = '';
+
+              if (rootRes.data && rootRes.data.length > 0) {
+                files = rootRes.data.filter(item => item.name && item.name.match(/\.(mp3|wav|m4a|aac|ogg|flac)$/i));
+                currentPath = '';
+              }
             }
 
             if (!files || files.length === 0) return [];
@@ -129,6 +149,7 @@ app.post('/admin/login', (req, res) => {
   return res.status(401).json({ success: false, error: 'Incorrect Dev Key' });
 });
 
+// Upload song directly into selected playlist folder
 app.post('/admin/upload', verifyAdmin, upload.single('songFile'), async (req, res) => {
   try {
     const { playlist, customTitle } = req.body;
@@ -174,6 +195,7 @@ app.post('/admin/upload', verifyAdmin, upload.single('songFile'), async (req, re
   }
 });
 
+// Delete song
 app.post('/admin/delete', verifyAdmin, async (req, res) => {
   try {
     const { playlist, fileName } = req.body;
@@ -186,11 +208,21 @@ app.post('/admin/delete', verifyAdmin, async (req, res) => {
     let deleted = false;
 
     for (const acc of accounts) {
-      const { data, error } = await acc.client.storage
+      let { data, error } = await acc.client.storage
         .from(acc.bucket)
         .remove([targetFilePath]);
 
       if (!error && data && data.length > 0) {
+        deleted = true;
+        break;
+      }
+
+      // Check root if uploaded in root previously
+      const rootRes = await acc.client.storage
+        .from(acc.bucket)
+        .remove([fileName]);
+
+      if (!rootRes.error && rootRes.data && rootRes.data.length > 0) {
         deleted = true;
         break;
       }
@@ -202,6 +234,7 @@ app.post('/admin/delete', verifyAdmin, async (req, res) => {
   }
 });
 
+// Rename song
 app.post('/admin/rename', verifyAdmin, async (req, res) => {
   try {
     const { playlist, oldFileName, newTitle } = req.body;
@@ -221,6 +254,15 @@ app.post('/admin/rename', verifyAdmin, async (req, res) => {
         .move(oldPath, newPath);
 
       if (!error) {
+        moved = true;
+        break;
+      }
+
+      const rootMove = await acc.client.storage
+        .from(acc.bucket)
+        .move(oldFileName, newPath);
+
+      if (!rootMove.error) {
         moved = true;
         break;
       }
