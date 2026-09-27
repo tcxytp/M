@@ -8,11 +8,11 @@ app.use(cors({ origin: '*' }));
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const ADMIN_KEY = process.env.ADMIN_SECRET_KEY || 'Vision@Admin2026#Secure';
+const ADMIN_KEY = process.env.ADMIN_SECRET_KEY || 'Vision@Admin7827#Secure';
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024 } // 50MB per song
+  limits: { fileSize: 60 * 1024 * 1024 } // 60MB max
 });
 
 const TARGET_FOLDERS = [
@@ -47,8 +47,9 @@ function getSupabaseClients() {
 
 function verifyAdmin(req, res, next) {
   const authHeader = req.headers['authorization'] || req.headers['x-admin-key'];
-  if (!authHeader || authHeader.replace('Bearer ', '').trim() !== ADMIN_KEY) {
-    return res.status(401).json({ success: false, error: 'Unauthorized: Invalid Admin Secret' });
+  const key = authHeader ? authHeader.replace('Bearer ', '').trim() : '';
+  if (key !== ADMIN_KEY) {
+    return res.status(401).json({ success: false, error: 'Unauthorized: Invalid Dev Key' });
   }
   next();
 }
@@ -57,75 +58,100 @@ app.get('/', (req, res) => {
   res.send('Vision Music Engine is Online.');
 });
 
-// Fetch all songs
+// PUBLIC API: NORMAL USERS (NO AUTH REQUIRED)
 app.get('/songs', async (req, res) => {
   try {
     const accounts = getSupabaseClients();
-    const promises = [];
+    const songPromises = [];
 
     for (const acc of accounts) {
-      for (const folderName of TARGET_FOLDERS) {
-        promises.push((async () => {
-          const { data: files } = await acc.client.storage
-            .from(acc.bucket)
-            .list(folderName, { limit: 1000, sortBy: { column: 'name', order: 'asc' } });
+      for (const folder of TARGET_FOLDERS) {
+        songPromises.push((async () => {
+          try {
+            let { data: files } = await acc.client.storage
+              .from(acc.bucket)
+              .list(folder, { limit: 1000, sortBy: { column: 'name', order: 'asc' } });
 
-          if (!files || files.length === 0) return [];
+            let currentPath = folder;
 
-          const audio = files.filter(f => f.name && !f.name.startsWith('.') && f.name.match(/\.(mp3|wav|m4a|aac|ogg|flac)$/i));
+            if (!files || files.length === 0) {
+              const rootRes = await acc.client.storage
+                .from(acc.bucket)
+                .list('', { limit: 1000, sortBy: { column: 'name', order: 'asc' } });
+              files = rootRes.data || [];
+              currentPath = '';
+            }
 
-          return audio.map((file, idx) => {
-            const { data } = acc.client.storage.from(acc.bucket).getPublicUrl(`${folderName}/${file.name}`);
-            return {
-              id: `${folderName.toLowerCase().replace(/[^a-z0-9]/g, '')}_${idx + 1}`,
-              fileName: file.name,
-              title: file.name.replace(/\.[^/.]+$/, '').replace(/_/g, ' ').trim(),
-              url: data.publicUrl,
-              playlist: folderName
-            };
-          });
+            if (!files || files.length === 0) return [];
+
+            const audioFiles = files.filter(f =>
+              f.name && !f.name.startsWith('.') &&
+              f.name.match(/\.(mp3|wav|m4a|aac|ogg|flac)$/i)
+            );
+
+            return audioFiles.map((file, idx) => {
+              const filePath = currentPath ? `${currentPath}/${file.name}` : file.name;
+              const { data: urlData } = acc.client.storage
+                .from(acc.bucket)
+                .getPublicUrl(filePath);
+
+              const cleanTitle = file.name.replace(/\.[^/.]+$/, '').replace(/_/g, ' ').trim();
+
+              return {
+                id: `${folder.toLowerCase().replace(/[^a-z0-9]/g, '')}_${idx + 1}`,
+                fileName: file.name,
+                title: cleanTitle,
+                url: urlData.publicUrl,
+                playlist: folder
+              };
+            });
+          } catch (e) {
+            return [];
+          }
         })());
       }
     }
 
-    const results = await Promise.all(promises);
+    const results = await Promise.all(songPromises);
     res.json(results.flat());
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch tracks' });
+  } catch (error) {
+    console.error('Fatal fetch error:', error);
+    res.status(500).json({ error: 'Server could not fetch songs' });
   }
 });
 
-// Admin Auth
+// DEVS APIS
 app.post('/admin/login', (req, res) => {
   const { password } = req.body;
-  if (password === ADMIN_KEY) {
-    return res.json({ success: true, message: 'Authenticated successfully' });
+  if (password && password.trim() === ADMIN_KEY) {
+    return res.json({ success: true, message: 'Dev Authentication Successful' });
   }
-  return res.status(401).json({ success: false, error: 'Invalid password' });
+  return res.status(401).json({ success: false, error: 'Incorrect Dev Key' });
 });
 
-// Upload song directly into matching folder
 app.post('/admin/upload', verifyAdmin, upload.single('songFile'), async (req, res) => {
   try {
     const { playlist, customTitle } = req.body;
     const file = req.file;
 
     if (!file || !playlist) {
-      return res.status(400).json({ success: false, error: 'File and Playlist are required' });
+      return res.status(400).json({ success: false, error: 'Missing audio file or playlist' });
     }
 
-    const cleanTitle = (customTitle || file.originalname.replace(/\.[^/.]+$/, ''))
+    const cleanBaseName = (customTitle || file.originalname.replace(/\.[^/.]+$/, ''))
       .trim()
-      .replace(/[^a-zA-Z0-9 _-]/g, '') + '.mp3';
+      .replace(/[/\\?%*:|"<>]/g, '');
+    const cleanFileName = `${cleanBaseName}.mp3`;
+    const targetFilePath = `${playlist}/${cleanFileName}`;
 
-    const targetPath = `${playlist}/${cleanTitle}`;
     const accounts = getSupabaseClients();
     let uploaded = false;
+    let uploadErrMsg = '';
 
     for (const acc of accounts) {
       const { data, error } = await acc.client.storage
         .from(acc.bucket)
-        .upload(targetPath, file.buffer, {
+        .upload(targetFilePath, file.buffer, {
           contentType: file.mimetype || 'audio/mpeg',
           upsert: true
         });
@@ -133,35 +159,36 @@ app.post('/admin/upload', verifyAdmin, upload.single('songFile'), async (req, re
       if (!error && data) {
         uploaded = true;
         break;
+      } else if (error) {
+        uploadErrMsg = error.message;
       }
     }
 
     if (uploaded) {
-      res.json({ success: true, message: `Uploaded to ${playlist} successfully!` });
+      res.json({ success: true, message: `"${cleanBaseName}" uploaded to ${playlist} successfully!` });
     } else {
-      res.status(500).json({ success: false, error: 'Failed to write file to Supabase' });
+      res.status(500).json({ success: false, error: uploadErrMsg || 'Could not write to Supabase bucket' });
     }
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// Delete song
 app.post('/admin/delete', verifyAdmin, async (req, res) => {
   try {
     const { playlist, fileName } = req.body;
     if (!playlist || !fileName) {
-      return res.status(400).json({ success: false, error: 'Missing parameters' });
+      return res.status(400).json({ success: false, error: 'Playlist & fileName required' });
     }
 
-    const targetPath = `${playlist}/${fileName}`;
+    const targetFilePath = `${playlist}/${fileName}`;
     const accounts = getSupabaseClients();
     let deleted = false;
 
     for (const acc of accounts) {
       const { data, error } = await acc.client.storage
         .from(acc.bucket)
-        .remove([targetPath]);
+        .remove([targetFilePath]);
 
       if (!error && data && data.length > 0) {
         deleted = true;
@@ -169,41 +196,40 @@ app.post('/admin/delete', verifyAdmin, async (req, res) => {
       }
     }
 
-    res.json({ success: true, message: `Deleted ${fileName} successfully` });
+    res.json({ success: true, message: `"${fileName}" deleted successfully.` });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// Rename song
 app.post('/admin/rename', verifyAdmin, async (req, res) => {
   try {
-    const { playlist, oldFileName, newFileName } = req.body;
-    if (!playlist || !oldFileName || !newFileName) {
+    const { playlist, oldFileName, newTitle } = req.body;
+    if (!playlist || !oldFileName || !newTitle) {
       return res.status(400).json({ success: false, error: 'Missing parameters' });
     }
 
-    const cleanNewName = newFileName.trim().replace(/[^a-zA-Z0-9 _-]/g, '') + '.mp3';
+    const cleanNewFileName = `${newTitle.trim().replace(/[/\\?%*:|"<>]/g, '')}.mp3`;
     const oldPath = `${playlist}/${oldFileName}`;
-    const newPath = `${playlist}/${cleanNewName}`;
+    const newPath = `${playlist}/${cleanNewFileName}`;
     const accounts = getSupabaseClients();
 
-    let renamed = false;
+    let moved = false;
     for (const acc of accounts) {
-      const { error: moveError } = await acc.client.storage
+      const { error } = await acc.client.storage
         .from(acc.bucket)
         .move(oldPath, newPath);
 
-      if (!moveError) {
-        renamed = true;
+      if (!error) {
+        moved = true;
         break;
       }
     }
 
-    if (renamed) {
-      res.json({ success: true, message: 'Song renamed successfully' });
+    if (moved) {
+      res.json({ success: true, message: `Renamed to "${newTitle}" successfully.` });
     } else {
-      res.status(500).json({ success: false, error: 'Failed to rename file' });
+      res.status(500).json({ success: false, error: 'Failed to rename on storage' });
     }
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
